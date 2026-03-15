@@ -43,6 +43,26 @@ db.connect((err) => {
   });
 });
 
+// HELPER: Registrar Movimiento en Bitácora
+function registrarMovimiento(id_usuario, id_rol, accion, detalles = '') {
+  if (!id_usuario) return;
+  
+  const registrar = (id_usr, id_rl) => {
+    const sql = 'INSERT INTO bitacora_movimiento (id_usuario, id_rol, accion, detalles) VALUES (?, ?, ?, ?)';
+    db.query(sql, [id_usr, id_rl, accion, detalles], (err) => {
+      if (err) console.error('Error registrando bitácora:', err);
+    });
+  };
+
+  if (!id_rol) {
+    db.query('SELECT id_rol FROM usuario WHERE id_usuario = ?', [id_usuario], (err, res) => {
+      if (!err && res.length > 0) registrar(id_usuario, res[0].id_rol);
+    });
+  } else {
+    registrar(id_usuario, id_rol);
+  }
+}
+
 // LOGIN
 app.post('/login', (req, res) => {
   const { correo, contrasena } = req.body;
@@ -57,7 +77,9 @@ app.post('/login', (req, res) => {
       if (results.length === 0) {
         return res.status(401).json({ mensaje: 'Correo o contraseña incorrectos' });
       }
-      res.json({ mensaje: 'Login exitoso', usuario: results[0] });
+      const usuarioData = results[0];
+      res.json({ mensaje: 'Login exitoso', usuario: usuarioData });
+      registrarMovimiento(usuarioData.id_usuario, usuarioData.id_rol, 'LOGIN', `Sesión Inicada (Manual). Autenticado como ${usuarioData.nombre} (${correo}) bajo el rol de ${usuarioData.rol}.`);
     }
   );
 });
@@ -90,7 +112,9 @@ app.post('/login-google', async (req, res) => {
           return res.status(403).json({ mensaje: 'Correo no registrado en el sistema. Contacte al administrador.' });
         }
         // Éxito, el correo está registrado
-        res.json({ mensaje: 'Login exitoso', usuario: results[0] });
+        const usuarioData = results[0];
+        res.json({ mensaje: 'Login exitoso', usuario: usuarioData });
+        registrarMovimiento(usuarioData.id_usuario, usuarioData.id_rol, 'LOGIN_GOOGLE', `Sesión Inicada (Google OAuth). Autenticado como ${usuarioData.nombre} (${correo}) bajo el rol de ${usuarioData.rol}.`);
       }
     );
   } catch (error) {
@@ -110,6 +134,28 @@ app.get('/usuarios', (req, res) => {
       res.json(results);
     }
   );
+});
+
+// OBTENER la bitácora de movimientos
+app.get('/bitacora', (req, res) => {
+  const query = `
+    SELECT 
+      b.id_bitacora, 
+      b.id_usuario,
+      u.nombre AS nombre_usuario, 
+      r.nombre AS rol_usuario, 
+      b.accion, 
+      b.detalles, 
+      b.fecha
+    FROM bitacora_movimiento b
+    LEFT JOIN usuario u ON b.id_usuario = u.id_usuario
+    LEFT JOIN rol r ON b.id_rol = r.id_rol
+    ORDER BY b.fecha DESC;
+  `;
+  db.query(query, (err, results) => {
+    if (err) return res.status(500).json({ error: err });
+    res.json(results);
+  });
 });
 
 // OBTENER todos los roles disponibles
@@ -137,6 +183,9 @@ app.post('/usuarios', (req, res) => {
         return res.status(500).json({ mensaje: 'Error al crear usuario', error: err });
       }
       res.status(201).json({ mensaje: 'Usuario creado con éxito', id: result.insertId });
+      
+      const adminId = req.headers['x-usuario-id'];
+      if(adminId) registrarMovimiento(adminId, null, 'CREACION_USUARIO', `Registro de nuevo usuario. ID asignado: ${result.insertId}, Nombre: ${nombre}, Correo: ${correo}, Nivel de Rol ID: ${id_rol}.`);
     }
   );
 });
@@ -153,6 +202,8 @@ app.put('/usuarios/:id', (req, res) => {
       (err) => {
         if (err) return res.status(500).json({ mensaje: 'Error al actualizar usuario', error: err });
         res.json({ mensaje: 'Usuario actualizado con éxito' });
+        const adminId = req.headers['x-usuario-id'];
+        if(adminId) registrarMovimiento(adminId, null, 'ACTUALIZACION_USUARIO', `Modificación de Perfil. ID afectado: ${id}. Nuevos datos -> Nombre: ${nombre}, Correo: ${correo}, Rol ID: ${id_rol}. (Contraseña modificada)`);
       }
     );
   } else {
@@ -162,6 +213,8 @@ app.put('/usuarios/:id', (req, res) => {
       (err) => {
         if (err) return res.status(500).json({ mensaje: 'Error al actualizar usuario', error: err });
         res.json({ mensaje: 'Usuario actualizado con éxito' });
+        const adminId = req.headers['x-usuario-id'];
+        if(adminId) registrarMovimiento(adminId, null, 'ACTUALIZACION_USUARIO', `Modificación de Perfil. ID afectado: ${id}. Nuevos datos -> Nombre: ${nombre}, Correo: ${correo}, Rol ID: ${id_rol}. (Sin alterar contraseña)`);
       }
     );
   }
@@ -173,6 +226,8 @@ app.delete('/usuarios/:id', (req, res) => {
   db.query('DELETE FROM usuario WHERE id_usuario = ?', [id], (err) => {
     if (err) return res.status(500).json({ mensaje: 'Error al eliminar usuario', error: err });
     res.json({ mensaje: 'Usuario eliminado con éxito' });
+    const adminId = req.headers['x-usuario-id'];
+    if(adminId) registrarMovimiento(adminId, null, 'ELIMINACION_USUARIO', `Eliminación permanente de cuenta de usuario. ID del usuario erradicado: ${id}.`);
   });
 });
 // OBTENER dependencias
@@ -239,6 +294,8 @@ app.post('/eventos', (req, res) => {
       }
 
       res.status(201).json({ mensaje: 'Evento creado con éxito', id_evento });
+      const reqUserId = req.headers['x-usuario-id'] || id_usuario;
+      if(reqUserId) registrarMovimiento(reqUserId, null, 'CREACION_EVENTO', `Nueva Solicitud de Evento. ID generado: ${id_evento}. Título: "${nombre}". Modalidad: ${modalidad}. Cantidad de Asistentes: ${cantidad_asistentes}. Creado para dependencia ID: ${id_dependencia}.`);
     }
   );
 });
@@ -274,6 +331,8 @@ app.put('/eventos/:id/estado', (req, res) => {
   db.query('UPDATE evento SET estado=? WHERE id_evento=?', [estado, id], (err) => {
     if (err) return res.status(500).json({ mensaje: 'Error al actualizar estado', error: err.message });
     res.json({ mensaje: 'Estado actualizado con éxito' });
+    const reqUserId = req.headers['x-usuario-id'];
+    if(reqUserId) registrarMovimiento(reqUserId, null, 'ACTUALIZACION_EVENTO', `Resolución de Estado del Evento. El Evento con ID ${id} ha pasado al estado: "${estado}".`);
   });
 });
 
@@ -286,6 +345,8 @@ app.delete('/eventos/:id', (req, res) => {
         db.query('DELETE FROM evento WHERE id_evento=?', [id], (err) => {
           if (err) return res.status(500).json({ mensaje: 'Error al eliminar evento', error: err.message });
           res.json({ mensaje: 'Evento eliminado con éxito' });
+          const reqUserId = req.headers['x-usuario-id'];
+          if(reqUserId) registrarMovimiento(reqUserId, null, 'ELIMINACION_EVENTO', `Cancelación y Borrado de Evento. Evento afectado ID: ${id}.`);
         });
       });
     });
@@ -338,6 +399,8 @@ app.post('/audiovisual', (req, res) => {
     db.query('INSERT INTO servicio_audiovisual (id_evento, tipo_servicio, estado, cantidad, ubicacion, observaciones) VALUES ?', [values], (errInsert) => {
       if (errInsert) return res.status(500).json({ mensaje: 'Error al registrar servicios', error: errInsert.message });
       res.status(201).json({ mensaje: 'Solicitud audiovisual registrada con éxito' });
+      const reqUserId = req.headers['x-usuario-id'];
+      if(reqUserId) registrarMovimiento(reqUserId, null, 'CREACION_AUDIOVISUAL', `Se levantó una Solicitud de Servicios Audiovisuales. Evento Asociado ID: ${id_evento}. Equipos requeridos: ${servicios.map(s => s.equipo).join(', ')}.`);
     });
   });
 });
@@ -404,7 +467,9 @@ app.put('/audiovisual/:id/estado', (req, res) => {
       return res.status(500).json({ mensaje: 'Error al actualizar estado', error: err.message });
     }
     console.log(`Update Result for id ${id}:`, result);
-    return res.json({ mensaje: 'Estado audiovisual actualizado con éxito', affectedRows: result.affectedRows });
+    res.json({ mensaje: 'Estado audiovisual actualizado con éxito', affectedRows: result.affectedRows });
+    const reqUserId = req.headers['x-usuario-id'];
+    if(reqUserId) registrarMovimiento(reqUserId, null, 'ACTUALIZACION_AUDIOVISUAL', `Resolución de Solicitud Audiovisual. El ticket ID ${id} ha pasado al estado: "${estado}".`);
   });
 });
 

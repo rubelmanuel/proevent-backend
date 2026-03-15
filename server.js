@@ -3,7 +3,11 @@ const mysql = require('mysql2');
 const cors = require('cors');
 const crypto = require('crypto');
 const nodemailer = require('nodemailer');
+const { OAuth2Client } = require('google-auth-library');
 require('dotenv').config();
+
+const GOOGLE_CLIENT_ID = '426335318098-v39ood0lcapc22lgoq3lons62hbf507m.apps.googleusercontent.com';
+const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
 
 const app = express();
 app.use(cors());
@@ -56,6 +60,43 @@ app.post('/login', (req, res) => {
       res.json({ mensaje: 'Login exitoso', usuario: results[0] });
     }
   );
+});
+
+// LOGIN CON GOOGLE
+app.post('/login-google', async (req, res) => {
+  const { credential } = req.body;
+  if (!credential) {
+    return res.status(400).json({ mensaje: 'Falta el token de Google' });
+  }
+
+  try {
+    const ticket = await googleClient.verifyIdToken({
+      idToken: credential,
+      audience: GOOGLE_CLIENT_ID,
+    });
+    const payload = ticket.getPayload();
+    const correo = payload.email;
+
+    db.query(
+      `SELECT u.id_usuario, u.nombre, u.correo, r.nombre AS rol
+       FROM usuario u
+       JOIN rol r ON u.id_rol = r.id_rol
+       WHERE u.correo = ?`,
+      [correo],
+      (err, results) => {
+        if (err) return res.status(500).json({ mensaje: 'Error del servidor' });
+        if (results.length === 0) {
+          // Si el correo no existe en la base de datos
+          return res.status(403).json({ mensaje: 'Correo no registrado en el sistema. Contacte al administrador.' });
+        }
+        // Éxito, el correo está registrado
+        res.json({ mensaje: 'Login exitoso', usuario: results[0] });
+      }
+    );
+  } catch (error) {
+    console.error('Error verificando token de Google:', error);
+    res.status(401).json({ mensaje: 'Token de Google inválido' });
+  }
 });
 
 // OBTENER todos los usuarios con su rol

@@ -1,6 +1,8 @@
 const express = require('express');
 const mysql = require('mysql2');
 const cors = require('cors');
+const crypto = require('crypto');
+const nodemailer = require('nodemailer');
 require('dotenv').config();
 
 const app = express();
@@ -21,6 +23,20 @@ db.connect((err) => {
     return;
   }
   console.log('✅ Conectado a MySQL correctamente');
+
+  // Asegurar que la tabla de tokens existe
+  const createTokensTable = `
+    CREATE TABLE IF NOT EXISTS restablecimiento_token (
+      id_token INT AUTO_INCREMENT PRIMARY KEY,
+      correo VARCHAR(120) NOT NULL,
+      token VARCHAR(255) NOT NULL,
+      expiracion DATETIME NOT NULL
+    )
+  `;
+  db.query(createTokensTable, (err) => {
+    if (err) console.error('Error al crear la tabla de tokens:', err);
+    else console.log('✅ Tabla de tokens verificada/creada');
+  });
 });
 
 // LOGIN
@@ -148,7 +164,7 @@ app.post('/eventos', (req, res) => {
       cantidad_asistentes, tipo_evento, monto_poa, moneda, id_usuario, id_dependencia, id_recinto)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [nombre, modalidad, fecha_inicio, fecha_fin, hora_inicio, hora_fin,
-     cantidad_asistentes, tipo_evento, monto_poa, moneda, id_usuario, id_dependencia, id_recinto],
+      cantidad_asistentes, tipo_evento, monto_poa, moneda, id_usuario, id_dependencia, id_recinto],
     (err, result) => {
       if (err) return res.status(500).json({ mensaje: 'Error al crear evento', error: err });
 
@@ -157,7 +173,7 @@ app.post('/eventos', (req, res) => {
       // Guardar detalles corporativos
       if (detalles_corporativos && detalles_corporativos.length > 0) {
         const valoresCorp = detalles_corporativos.map(tipo => [id_evento, tipo]);
-        db.query('INSERT INTO detalle_corporativo (id_evento, tipo) VALUES ?', [valoresCorp], () => {});
+        db.query('INSERT INTO detalle_corporativo (id_evento, tipo) VALUES ?', [valoresCorp], () => { });
       }
 
       // Guardar alimentos
@@ -170,7 +186,7 @@ app.post('/eventos', (req, res) => {
               if (encontrado) valores.push([id_evento, encontrado.id_alimento]);
             });
             if (valores.length > 0) {
-              db.query('INSERT INTO evento_alimento (id_evento, id_alimento) VALUES ?', [valores], () => {});
+              db.query('INSERT INTO evento_alimento (id_evento, id_alimento) VALUES ?', [valores], () => { });
             }
           }
         });
@@ -178,7 +194,7 @@ app.post('/eventos', (req, res) => {
 
       // Guardar observaciones como detalle de montaje
       if (observaciones && observaciones.trim() !== '') {
-        db.query('INSERT INTO detalle_montaje (id_evento, descripcion) VALUES (?, ?)', [id_evento, observaciones], () => {});
+        db.query('INSERT INTO detalle_montaje (id_evento, descripcion) VALUES (?, ?)', [id_evento, observaciones], () => { });
       }
 
       res.status(201).json({ mensaje: 'Evento creado con éxito', id_evento });
@@ -259,9 +275,9 @@ app.post('/audiovisual', (req, res) => {
     const diferenciaDias = Math.ceil(diferenciaTiempo / (1000 * 3600 * 24));
 
     if (diferenciaDias < 15) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         mensaje: `Políticas institucionales: La solicitud de equipos audiovisuales requiere un mínimo de 15 días de antelación. Faltan ${diferenciaDias} días para el evento.`,
-        dias_restantes: diferenciaDias 
+        dias_restantes: diferenciaDias
       });
     }
 
@@ -269,11 +285,11 @@ app.post('/audiovisual', (req, res) => {
     const values = servicios.map(s => {
       // (id_evento, tipo_servicio, estado, cantidad, ubicacion, observaciones)
       return [
-        id_evento, 
-        s.equipo, 
-        'Pendiente', 
-        s.cantidad || 1, 
-        s.ubicacion || '', 
+        id_evento,
+        s.equipo,
+        'Pendiente',
+        s.cantidad || 1,
+        s.ubicacion || '',
         s.observaciones || ''
       ];
     });
@@ -298,7 +314,7 @@ app.get('/audiovisual', (req, res) => {
      ORDER BY s.id_servicio DESC`,
     (err, results) => {
       if (err) return res.status(500).json({ error: err.message });
-      
+
       const parsedResults = results.map(row => {
         // Fallback robusto en caso de que aún exista data comprimida vieja (ej: Proyector|Cant:2|Ubic:A)
         let equipo = row.tipo_servicio;
@@ -307,11 +323,11 @@ app.get('/audiovisual', (req, res) => {
         let obs = row.observaciones;
 
         if (row.tipo_servicio.includes('|Cant:')) {
-           const parts = row.tipo_servicio.split('|');
-           equipo = parts[0];
-           if (parts[1]) cant = parts[1].replace('Cant:', '');
-           if (parts[2]) ubic = parts[2].replace('Ubic:', '');
-           if (parts[3]) obs = parts[3].replace('Obs:', '');
+          const parts = row.tipo_servicio.split('|');
+          equipo = parts[0];
+          if (parts[1]) cant = parts[1].replace('Cant:', '');
+          if (parts[2]) ubic = parts[2].replace('Ubic:', '');
+          if (parts[3]) obs = parts[3].replace('Obs:', '');
         }
 
         return {
@@ -337,14 +353,137 @@ app.put('/audiovisual/:id/estado', (req, res) => {
   const { id } = req.params;
   const { estado } = req.body;
   const estadosValidos = ['Pendiente', 'En revisión', 'Aprobado', 'Rechazado', 'Completado'];
-  
+
   if (!estadosValidos.includes(estado))
     return res.status(400).json({ mensaje: 'Estado audiovisual no válido' });
-    
-  db.query('UPDATE servicio_audiovisual SET estado=? WHERE id_servicio=?', [estado, id], (err) => {
-    if (err) return res.status(500).json({ mensaje: 'Error al actualizar estado', error: err.message });
-    res.json({ mensaje: 'Estado audiovisual actualizado con éxito' });
+
+  db.query('UPDATE servicio_audiovisual SET estado=? WHERE id_servicio=?', [estado, id], (err, result) => {
+    if (err) {
+      console.error('Update Error:', err);
+      return res.status(500).json({ mensaje: 'Error al actualizar estado', error: err.message });
+    }
+    console.log(`Update Result for id ${id}:`, result);
+    return res.json({ mensaje: 'Estado audiovisual actualizado con éxito', affectedRows: result.affectedRows });
   });
+});
+
+// ── RESTABLECIMIENTO DE CONTRASEÑA (EMAIL FLOW) ───────
+app.post('/solicitar-restablecimiento', (req, res) => {
+  const { correo } = req.body;
+
+  db.query('SELECT id_usuario FROM usuario WHERE correo = ?', [correo], (err, results) => {
+    if (err) return res.status(500).json({ mensaje: 'Error al consultar la base de datos' });
+    if (results.length === 0) {
+      return res.status(404).json({ mensaje: 'El correo no está registrado' });
+    }
+
+    // Generar token único
+    const token = crypto.randomBytes(32).toString('hex');
+    const expiracion = new Date(Date.now() + 3600000); // 1 hora de validez
+
+    db.query(
+      'INSERT INTO restablecimiento_token (correo, token, expiracion) VALUES (?, ?, ?)',
+      [correo, token, expiracion],
+      (errInsert) => {
+        if (errInsert) return res.status(500).json({ mensaje: 'Error al generar el token' });
+
+        const link = `http://localhost:3000/reset-password/${token}`;
+
+        // Transportador Gmail
+        const transporter = nodemailer.createTransport({
+          service: 'gmail',
+          auth: {
+            user: process.env.GMAIL_USER,
+            pass: process.env.GMAIL_PASS,
+          },
+        });
+
+        const mailOptions = {
+          from: `"ProEvent UAPA" <${process.env.GMAIL_USER}>`,
+          to: correo,
+          subject: 'Restablecer tu contraseña - ProEvent UAPA',
+          text: `Hola,\n\nRecibimos una solicitud para restablecer la contraseña de tu cuenta en ProEvent UAPA.\n\nEnlace de restablecimiento (válido por 1 hora):\n${link}\n\nSi no solicitaste este cambio, ignora este correo.\n\nSistema de Gestión de Eventos – UAPA ProEvent`,
+          html: `
+            <div style="font-family: Arial, sans-serif; max-width: 520px; margin: 0 auto; padding: 28px; border: 1px solid #e0e0e0; border-radius: 14px;">
+              <div style="text-align:center; margin-bottom: 20px;">
+                <span style="background:#1e3a5f; color:white; font-size:22px; font-weight:bold; padding:8px 18px; border-radius:8px;">PE</span>
+                <span style="font-size:22px; font-weight:bold; color:#1e3a5f; margin-left:10px;">Pro<span style="color:#f97316;">Event</span></span>
+              </div>
+              <h2 style="color:#1e3a5f; text-align:center;">Recuperación de Contraseña</h2>
+              <p>Hola,</p>
+              <p>Recibimos una solicitud para restablecer la contraseña de tu cuenta. Haz clic en el botón de abajo para continuar. <strong>Este enlace es válido por 1 hora.</strong></p>
+              <div style="text-align: center; margin: 32px 0;">
+                <a href="${link}" style="background-color:#1e3a5f; color:white; padding:14px 32px; border-radius:8px; text-decoration:none; font-weight:bold; font-size:16px; display:inline-block;">
+                  Restablecer Contraseña
+                </a>
+              </div>
+              <p style="font-size:13px; color:#555;">O copia y pega este enlace en tu navegador:</p>
+              <p style="word-break:break-all; color:#1e3a5f; font-size:13px;">${link}</p>
+              <hr style="border:none; border-top:1px solid #eee; margin:24px 0;">
+              <p style="color:#aaa; font-size:12px;">Si no solicitaste este cambio, ignora este correo. Tu cuenta sigue segura.</p>
+              <p style="color:#ccc; font-size:11px;">Sistema de Gestión de Eventos – Universidad UAPA</p>
+            </div>
+          `,
+        };
+
+        transporter.sendMail(mailOptions, (errMail, info) => {
+          if (errMail) {
+            console.error('❌ Error enviando correo:', errMail.message);
+            return res.status(500).json({ mensaje: 'Error al enviar el correo. Intente de nuevo.' });
+          }
+          console.log(`✅ Correo enviado a: ${correo} (ID: ${info.messageId})`);
+          res.json({ mensaje: 'Se ha enviado un enlace a su correo electrónico.' });
+        });
+      }
+    );
+  });
+});
+
+app.get('/validar-token/:token', (req, res) => {
+  const { token } = req.params;
+  db.query(
+    'SELECT correo FROM restablecimiento_token WHERE token = ? AND expiracion > NOW()',
+    [token],
+    (err, results) => {
+      if (err) return res.status(500).json({ mensaje: 'Error al validar el token' });
+      if (results.length === 0) {
+        return res.status(400).json({ mensaje: 'Token inválido o expirado' });
+      }
+      res.json({ mensaje: 'Token válido', correo: results[0].correo });
+    }
+  );
+});
+
+app.post('/restablecer-contrasena', (req, res) => {
+  const { token, nuevaContrasena } = req.body;
+
+  // 1. Validar token
+  db.query(
+    'SELECT correo FROM restablecimiento_token WHERE token = ? AND expiracion > NOW()',
+    [token],
+    (err, results) => {
+      if (err) return res.status(500).json({ mensaje: 'Error al validar el token' });
+      if (results.length === 0) {
+        return res.status(400).json({ mensaje: 'Token inválido o expirado' });
+      }
+
+      const correo = results[0].correo;
+
+      // 2. Actualizar contraseña
+      db.query(
+        'UPDATE usuario SET contrasena = ? WHERE correo = ?',
+        [nuevaContrasena, correo],
+        (errUpdate) => {
+          if (errUpdate) return res.status(500).json({ mensaje: 'Error al actualizar la contraseña' });
+
+          // 3. Eliminar token usado
+          db.query('DELETE FROM restablecimiento_token WHERE correo = ?', [correo], () => { });
+
+          res.json({ mensaje: 'Contraseña actualizada con éxito' });
+        }
+      );
+    }
+  );
 });
 
 app.listen(8080, () => {

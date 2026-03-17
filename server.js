@@ -41,6 +41,25 @@ db.connect((err) => {
     if (err) console.error('Error al crear la tabla de tokens:', err);
     else console.log('✅ Tabla de tokens verificada/creada');
   });
+
+  // Asegurar que la tabla de evaluaciones existe
+  const createEvalTable = `
+    CREATE TABLE IF NOT EXISTS evaluacion (
+      id_evaluacion INT AUTO_INCREMENT PRIMARY KEY,
+      id_evento INT NOT NULL,
+      respuesta_solicitud ENUM('Si','No'),
+      recinto ENUM('Cibao Oriental','Nagua','Santo Domingo Oriental','Santiago'),
+      valoracion_respuesta ENUM('Muy eficiente','Excelente','Eficiente','Deficiente'),
+      satisfaccion INT CHECK (satisfaccion BETWEEN 1 AND 5),
+      comentario TEXT,
+      fecha DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (id_evento) REFERENCES evento(id_evento) ON DELETE CASCADE
+    )
+  `;
+  db.query(createEvalTable, (err) => {
+    if (err) console.error('Error al crear la tabla de evaluaciones:', err);
+    else console.log('✅ Tabla de evaluaciones verificada/creada');
+  });
 });
 
 // HELPER: Registrar Movimiento en Bitácora
@@ -362,7 +381,7 @@ app.post('/audiovisual', (req, res) => {
     return res.status(400).json({ mensaje: 'Faltan datos requeridos o servicios audiovisuales.' });
   }
 
-  // 1. Validar la regla de 15 días de anticipación
+  // 1. Validar la regla de 5 días de anticipación
   db.query('SELECT fecha_inicio FROM evento WHERE id_evento = ?', [id_evento], (err, results) => {
     if (err) return res.status(500).json({ mensaje: 'Error al buscar el evento', error: err.message });
     if (results.length === 0) return res.status(404).json({ mensaje: 'Evento no encontrado' });
@@ -376,9 +395,9 @@ app.post('/audiovisual', (req, res) => {
     const diferenciaTiempo = fechaEvento.getTime() - fechaActual.getTime();
     const diferenciaDias = Math.ceil(diferenciaTiempo / (1000 * 3600 * 24));
 
-    if (diferenciaDias < 15) {
+    if (diferenciaDias < 5) {
       return res.status(400).json({
-        mensaje: `Políticas institucionales: La solicitud de equipos audiovisuales requiere un mínimo de 15 días de antelación. Faltan ${diferenciaDias} días para el evento.`,
+        mensaje: `Políticas institucionales: La solicitud de equipos audiovisuales requiere un mínimo de 5 días de antelación. Faltan ${diferenciaDias} días para el evento.`,
         dias_restantes: diferenciaDias
       });
     }
@@ -590,6 +609,167 @@ app.post('/restablecer-contrasena', (req, res) => {
       );
     }
   );
+});
+
+// ── EVALUACIONES — CREAR ───────────────────────────────
+app.post('/evaluaciones', (req, res) => {
+  const { id_evento, respuesta_solicitud, recinto, valoracion_respuesta, satisfaccion, comentario } = req.body;
+
+  if (!id_evento || !respuesta_solicitud || !recinto || !valoracion_respuesta || !satisfaccion) {
+    return res.status(400).json({ mensaje: 'Todos los campos obligatorios deben ser completados.' });
+  }
+
+  if (satisfaccion < 1 || satisfaccion > 5) {
+    return res.status(400).json({ mensaje: 'El nivel de satisfacción debe estar entre 1 y 5.' });
+  }
+
+  db.query(
+    `INSERT INTO evaluacion (id_evento, respuesta_solicitud, recinto, valoracion_respuesta, satisfaccion, comentario)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [id_evento, respuesta_solicitud, recinto, valoracion_respuesta, satisfaccion, comentario || null],
+    (err, result) => {
+      if (err) return res.status(500).json({ mensaje: 'Error al registrar la evaluación', error: err.message });
+      res.status(201).json({ mensaje: 'Evaluación enviada con éxito', id_evaluacion: result.insertId });
+      const reqUserId = req.headers['x-usuario-id'];
+      if (reqUserId) registrarMovimiento(
+        reqUserId, null, 'CREACION_EVALUACION',
+        `Nueva evaluación registrada. ID: ${result.insertId}. Evento ID: ${id_evento}. Recinto: ${recinto}. Valoración: ${valoracion_respuesta}. Satisfacción: ${satisfaccion}/5.`
+      );
+    }
+  );
+});
+
+// ── EVALUACIONES — OBTENER TODAS ───────────────────────
+app.get('/evaluaciones', (req, res) => {
+  db.query(
+    `SELECT
+       ev.id_evaluacion, ev.id_evento, ev.respuesta_solicitud,
+       ev.recinto, ev.valoracion_respuesta, ev.satisfaccion,
+       ev.comentario, ev.fecha,
+       e.nombre AS nombre_evento
+     FROM evaluacion ev
+     LEFT JOIN evento e ON ev.id_evento = e.id_evento
+     ORDER BY ev.fecha DESC`,
+    (err, results) => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json(results);
+    }
+  );
+});
+
+// ── CATÁLOGOS DINÁMICOS ─────────────────────────────────
+
+// 1. Equipos Audiovisuales
+app.get('/equipos-audiovisuales', (req, res) => {
+  db.query('SELECT * FROM equipo_audiovisual ORDER BY nombre ASC', (err, results) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json(results);
+  });
+});
+app.post('/equipos-audiovisuales', (req, res) => {
+  const { nombre, icono } = req.body;
+  if (!nombre) return res.status(400).json({ mensaje: 'Nombre requerido' });
+  db.query('INSERT INTO equipo_audiovisual (nombre, icono) VALUES (?, ?)', [nombre, icono || 'FiMonitor'], (err, result) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.status(201).json({ mensaje: 'Equipo Creado', id: result.insertId });
+  });
+});
+app.put('/equipos-audiovisuales/:id', (req, res) => {
+  const { nombre, icono } = req.body;
+  db.query('UPDATE equipo_audiovisual SET nombre=?, icono=? WHERE id_equipo=?', [nombre, icono, req.params.id], (err) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json({ mensaje: 'Equipo Actualizado' });
+  });
+});
+app.delete('/equipos-audiovisuales/:id', (req, res) => {
+  db.query('DELETE FROM equipo_audiovisual WHERE id_equipo=?', [req.params.id], (err) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json({ mensaje: 'Equipo Eliminado' });
+  });
+});
+
+// 2. Tipos de Evento Master
+app.get('/tipos-evento', (req, res) => {
+  db.query('SELECT * FROM tipo_evento_master ORDER BY nombre ASC', (err, results) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json(results);
+  });
+});
+app.post('/tipos-evento', (req, res) => {
+  const { nombre } = req.body;
+  if (!nombre) return res.status(400).json({ mensaje: 'Nombre requerido' });
+  db.query('INSERT INTO tipo_evento_master (nombre) VALUES (?)', [nombre], (err, result) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.status(201).json({ mensaje: 'Tipo Creado', id: result.insertId });
+  });
+});
+app.put('/tipos-evento/:id', (req, res) => {
+  db.query('UPDATE tipo_evento_master SET nombre=? WHERE id_tipo_evento=?', [req.body.nombre, req.params.id], (err) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json({ mensaje: 'Tipo Actualizado' });
+  });
+});
+app.delete('/tipos-evento/:id', (req, res) => {
+  db.query('DELETE FROM tipo_evento_master WHERE id_tipo_evento=?', [req.params.id], (err) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json({ mensaje: 'Tipo Eliminado' });
+  });
+});
+
+// 3. Tipos de Detalle Corporativo
+app.get('/tipos-detalle-corporativo', (req, res) => {
+  db.query('SELECT * FROM tipo_detalle_corporativo ORDER BY nombre ASC', (err, results) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json(results);
+  });
+});
+app.post('/tipos-detalle-corporativo', (req, res) => {
+  const { nombre } = req.body;
+  if (!nombre) return res.status(400).json({ mensaje: 'Nombre requerido' });
+  db.query('INSERT INTO tipo_detalle_corporativo (nombre) VALUES (?)', [nombre], (err, result) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.status(201).json({ mensaje: 'Detalle Creado', id: result.insertId });
+  });
+});
+app.put('/tipos-detalle-corporativo/:id', (req, res) => {
+  db.query('UPDATE tipo_detalle_corporativo SET nombre=? WHERE id_detalle_corp=?', [req.body.nombre, req.params.id], (err) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json({ mensaje: 'Detalle Actualizado' });
+  });
+});
+app.delete('/tipos-detalle-corporativo/:id', (req, res) => {
+  db.query('DELETE FROM tipo_detalle_corporativo WHERE id_detalle_corp=?', [req.params.id], (err) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json({ mensaje: 'Detalle Eliminado' });
+  });
+});
+
+// 4. Alimentos
+app.get('/alimentos', (req, res) => {
+  db.query('SELECT * FROM alimento ORDER BY nombre ASC', (err, results) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json(results);
+  });
+});
+app.post('/alimentos', (req, res) => {
+  const { nombre } = req.body;
+  if (!nombre) return res.status(400).json({ mensaje: 'Nombre requerido' });
+  db.query('INSERT INTO alimento (nombre) VALUES (?)', [nombre], (err, result) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.status(201).json({ mensaje: 'Alimento Creado', id: result.insertId });
+  });
+});
+app.put('/alimentos/:id', (req, res) => {
+  db.query('UPDATE alimento SET nombre=? WHERE id_alimento=?', [req.body.nombre, req.params.id], (err) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json({ mensaje: 'Alimento Actualizado' });
+  });
+});
+app.delete('/alimentos/:id', (req, res) => {
+  db.query('DELETE FROM alimento WHERE id_alimento=?', [req.params.id], (err) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json({ mensaje: 'Alimento Eliminado' });
+  });
 });
 
 app.listen(8080, () => {

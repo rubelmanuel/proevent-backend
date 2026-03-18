@@ -1,0 +1,5 @@
+[dotenv@17.3.1] injecting env (2) from .env -- tip: ≡ƒöÉ prevent committing .env to code: https://dotenvx.com/precommit
+≡ƒÜÇ Servidor corriendo en http://localhost:8080
+Γ£à Conectado a MySQL correctamente
+Γ£à Tabla de tokens verificada/creada
+Γ£à Tabla de evaluaciones verificada/creada

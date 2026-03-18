@@ -13,20 +13,24 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const db = mysql.createConnection({
+const db = mysql.createPool({
   host: 'localhost',
   user: 'root',
   password: '',
   database: 'uapa_proevent',
-  port: 3307
+  port: 3307,
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0
 });
 
-db.connect((err) => {
+db.getConnection((err, connection) => {
   if (err) {
     console.log('Error conectando a MySQL:', err);
     return;
   }
-  console.log('✅ Conectado a MySQL correctamente');
+  if (connection) connection.release();
+  console.log('✅ Conectado a MySQL correctamente (Pool)');
 
   // Asegurar que la tabla de tokens existe
   const createTokensTable = `

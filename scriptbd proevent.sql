@@ -94,7 +94,7 @@ CREATE TABLE evento_alimento (
     PRIMARY KEY (id_evento, id_alimento),
     
     FOREIGN KEY (id_evento) REFERENCES evento(id_evento) ON DELETE CASCADE,
-    FOREIGN KEY (id_alimento) REFERENCES alimento(id_alimento)
+    FOREIGN KEY (id_alimento) REFERENCES alimento(id_alimento) ON DELETE CASCADE
 );
 CREATE TABLE servicio_audiovisual (
     id_servicio INT AUTO_INCREMENT PRIMARY KEY,

@@ -324,24 +324,71 @@ app.post('/eventos', (req, res) => {
 });
 // ── EVENTOS — OBTENER TODOS ────────────────────────────
 app.get('/eventos', (req, res) => {
-  db.query(
-    `SELECT
+  const { usuario_id } = req.query;
+  let sql = `SELECT
        e.id_evento, e.nombre, e.modalidad, e.fecha_inicio, e.fecha_fin,
        e.hora_inicio, e.hora_fin, e.cantidad_asistentes, e.tipo_evento,
        e.monto_poa, e.moneda, e.estado, e.fecha_creacion,
        u.nombre  AS solicitante,
+       u.id_usuario,
        d.nombre  AS dependencia,
-       r.nombre  AS recinto
+       r.nombre  AS recinto,
+       (SELECT GROUP_CONCAT(dc.tipo SEPARATOR ', ') FROM detalle_corporativo dc WHERE dc.id_evento = e.id_evento) AS detalles_corporativos,
+       (SELECT GROUP_CONCAT(a.nombre SEPARATOR ', ') FROM evento_alimento ea JOIN alimento a ON ea.id_alimento = a.id_alimento WHERE ea.id_evento = e.id_evento) AS alimentos,
+       (SELECT GROUP_CONCAT(dm.descripcion SEPARATOR ' | ') FROM detalle_montaje dm WHERE dm.id_evento = e.id_evento) AS observaciones,
+       IF((SELECT COUNT(*) FROM servicio_audiovisual sa WHERE sa.id_evento = e.id_evento) > 0, 1, 0) AS necesita_audiovisual,
+       (SELECT GROUP_CONCAT(CONCAT(sa.cantidad, 'x ', sa.tipo_servicio) SEPARATOR ', ') FROM servicio_audiovisual sa WHERE sa.id_evento = e.id_evento AND sa.estado != 'Rechazado') AS equipos_audiovisuales
      FROM evento e
      LEFT JOIN usuario     u ON e.id_usuario     = u.id_usuario
      LEFT JOIN dependencia d ON e.id_dependencia = d.id_dependencia
-     LEFT JOIN recinto     r ON e.id_recinto     = r.id_recinto
-     ORDER BY e.fecha_creacion DESC`,
-    (err, results) => {
-      if (err) return res.status(500).json({ error: err.message });
-      res.json(results);
-    }
-  );
+     LEFT JOIN recinto     r ON e.id_recinto     = r.id_recinto`;
+  
+  const params = [];
+  if (usuario_id) {
+    sql += ` WHERE e.id_usuario = ?`;
+    params.push(usuario_id);
+  }
+
+  sql += ` ORDER BY e.fecha_creacion DESC`;
+
+  db.query(sql, params, (err, results) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json(results);
+  });
+});
+
+// ── EVENTOS — CALENDARIO PRIVADO ───────────────────────
+app.get('/calendario-eventos', (req, res) => {
+  const { usuario_id } = req.query; // ID del usuario que consulta
+  
+  const sql = `
+    SELECT 
+      e.id_evento, e.nombre, e.fecha_inicio, e.fecha_fin, e.id_usuario,
+      r.nombre AS recinto,
+      IF((SELECT COUNT(*) FROM servicio_audiovisual sa WHERE sa.id_evento = e.id_evento AND sa.estado != 'Rechazado') > 0, 1, 0) AS necesita_audiovisual
+    FROM evento e
+    LEFT JOIN recinto r ON e.id_recinto = r.id_recinto
+    WHERE e.estado != 'Rechazado'
+  `;
+
+  db.query(sql, (err, results) => {
+    if (err) return res.status(500).json({ error: err.message });
+
+    const processed = results.map(evt => {
+      const esPropio = usuario_id && evt.id_usuario == usuario_id;
+      return {
+        id: evt.id_evento,
+        start: evt.fecha_inicio,
+        end: evt.fecha_fin,
+        title: esPropio ? evt.nombre : "Ocupado",
+        recinto: esPropio ? evt.recinto : "Información Privada",
+        esPropio: esPropio,
+        necesita_audiovisual: evt.necesita_audiovisual === 1
+      };
+    });
+
+    res.json(processed);
+  });
 });
 
 // ── EVENTOS — ACTUALIZAR ESTADO ────────────────────────
@@ -430,19 +477,29 @@ app.post('/audiovisual', (req, res) => {
 
 // ── AUDIOVISUAL — OBTENER TODAS ─────────────────────────
 app.get('/audiovisual', (req, res) => {
-  db.query(
-    `SELECT 
+  const { usuario_id } = req.query;
+  let sql = `SELECT 
        s.id_servicio, s.id_evento, s.tipo_servicio, s.estado AS estado_av,
        s.cantidad, s.ubicacion, s.observaciones,
-       e.nombre AS nombre_evento, e.fecha_inicio, r.nombre AS recinto
+       e.nombre AS nombre_evento, e.fecha_inicio, r.nombre AS recinto,
+       e.id_usuario, u.nombre AS nombre_usuario
      FROM servicio_audiovisual s
      JOIN evento e ON s.id_evento = e.id_evento
      LEFT JOIN recinto r ON e.id_recinto = r.id_recinto
-     ORDER BY s.id_servicio DESC`,
-    (err, results) => {
-      if (err) return res.status(500).json({ error: err.message });
+     LEFT JOIN usuario u ON e.id_usuario = u.id_usuario`;
+  
+  const params = [];
+  if (usuario_id) {
+    sql += ` WHERE e.id_usuario = ?`;
+    params.push(usuario_id);
+  }
 
-      const parsedResults = results.map(row => {
+  sql += ` ORDER BY s.id_servicio DESC`;
+
+  db.query(sql, params, (err, results) => {
+    if (err) return res.status(500).json({ error: err.message });
+
+    const parsedResults = results.map(row => {
         // Fallback robusto en caso de que aún exista data comprimida vieja (ej: Proyector|Cant:2|Ubic:A)
         let equipo = row.tipo_servicio;
         let cant = row.cantidad;
@@ -466,7 +523,8 @@ app.get('/audiovisual', (req, res) => {
           equipo: equipo,
           cantidad: cant || 1,
           ubicacion: ubic || '',
-          observaciones: obs || ''
+          observaciones: obs || '',
+          nombre_usuario: row.nombre_usuario || ''
         };
       });
 
@@ -493,6 +551,26 @@ app.put('/audiovisual/:id/estado', (req, res) => {
     res.json({ mensaje: 'Estado audiovisual actualizado con éxito', affectedRows: result.affectedRows });
     const reqUserId = req.headers['x-usuario-id'];
     if(reqUserId) registrarMovimiento(reqUserId, null, 'ACTUALIZACION_AUDIOVISUAL', `Resolución de Solicitud Audiovisual. El ticket ID ${id} ha pasado al estado: "${estado}".`);
+  });
+});
+
+// ── AUDIOVISUAL — ACTUALIZAR ESTADO (GLOBAL POR EVENTO) ─
+app.put('/audiovisual/evento/:id_evento/estado', (req, res) => {
+  const { id_evento } = req.params;
+  const { estado } = req.body;
+  const estadosValidos = ['Pendiente', 'En revisión', 'Aprobado', 'Rechazado', 'Completado'];
+
+  if (!estadosValidos.includes(estado))
+    return res.status(400).json({ mensaje: 'Estado audiovisual no válido' });
+
+  db.query('UPDATE servicio_audiovisual SET estado=? WHERE id_evento=?', [estado, id_evento], (err, result) => {
+    if (err) {
+      console.error('Update All Error:', err);
+      return res.status(500).json({ mensaje: 'Error al actualizar estado general', error: err.message });
+    }
+    res.json({ mensaje: 'Estado audiovisual del evento actualizado con éxito', affectedRows: result.affectedRows });
+    const reqUserId = req.headers['x-usuario-id'];
+    if(reqUserId) registrarMovimiento(reqUserId, null, 'ACTUALIZACION_AUDIOVISUAL_GLOBAL', `Resolución Global de Audiovisual. Los servicios del Evento ID ${id_evento} pasaron al estado: "${estado}".`);
   });
 });
 
@@ -671,16 +749,16 @@ app.get('/equipos-audiovisuales', (req, res) => {
   });
 });
 app.post('/equipos-audiovisuales', (req, res) => {
-  const { nombre, icono } = req.body;
+  const { nombre, icono, cantidad_total } = req.body;
   if (!nombre) return res.status(400).json({ mensaje: 'Nombre requerido' });
-  db.query('INSERT INTO equipo_audiovisual (nombre, icono) VALUES (?, ?)', [nombre, icono || 'FiMonitor'], (err, result) => {
+  db.query('INSERT INTO equipo_audiovisual (nombre, icono, cantidad_total) VALUES (?, ?, ?)', [nombre, icono || 'FiMonitor', cantidad_total || 0], (err, result) => {
     if (err) return res.status(500).json({ error: err.message });
     res.status(201).json({ mensaje: 'Equipo Creado', id: result.insertId });
   });
 });
 app.put('/equipos-audiovisuales/:id', (req, res) => {
-  const { nombre, icono } = req.body;
-  db.query('UPDATE equipo_audiovisual SET nombre=?, icono=? WHERE id_equipo=?', [nombre, icono, req.params.id], (err) => {
+  const { nombre, icono, cantidad_total } = req.body;
+  db.query('UPDATE equipo_audiovisual SET nombre=?, icono=?, cantidad_total=? WHERE id_equipo=?', [nombre, icono, cantidad_total || 0, req.params.id], (err) => {
     if (err) return res.status(500).json({ error: err.message });
     res.json({ mensaje: 'Equipo Actualizado' });
   });
